@@ -12,9 +12,8 @@
 
 ### PREP R
 
-## Set working directory
-setwd("C:/Users/lcx127/ALS Team Dropbox/Roser Montañana-Rosell/HiPlex_Up")
-
+## Set current working directory
+setwd("/Users/angusgray/Desktop/V0d-Histology/HiPlexUp-V0d-Pipeline")
 
 ## Activate packages
 library(dplyr)
@@ -29,27 +28,26 @@ library(svglite)
 
 
 
-
-
 #######################
 ####   LOAD DATA   ####
 #######################
 
-### Load excel file for NT (cell intensities) (eeds readxl)
-NT <- read_xlsx("NT.xlsx")
-
+### Load excel file for all NT (cell intensities) (microscope measurements) (reads readxls data after segmentation)
+NT <- read_xlsx("raw_xls/NT.xlsx")
 
 ### ADD ANIMAL ID
 
 ## Load excel file for animal IDs (needs readxl)
 ## Add animal ID columns to data file based on "Image" (it will duplicate it depending on Image ID), then move after "Image" (needs dplyr)
 
-Animals <- read_xlsx("Animals.xlsx")
+Animals <- read_xlsx("raw_xls/Animals.xlsx")
 
+## Perform a left-merge, merging the animal and cell intensity datasets 
 NT <- merge(NT, Animals, by="Image", all.x=TRUE)
 NT <- relocate(NT, Animal, .after = Image)
-rm(Animals)
 
+## remove temporary animals spreadsheet we added in 
+rm(Animals)
 
 
 
@@ -57,7 +55,7 @@ rm(Animals)
 ####   NORMALIZATION   ####
 ###########################
 
-### SET NEW ORIGIN (CC 0,0) AND ROTATE
+### SET NEW ORIGIN (CC 0,0) AND ROTATE -- corpus collosum as a reference point here for spatial normalisation 
 
 ## Load .xlsx file for CC coordinates and angle (new 0, 0) (needs readxl)
 # Add rotation info to Markers dataframe, based on Image (needs dplyr)
@@ -66,7 +64,7 @@ rm(Animals)
 #(for the angle, use either mean/unique/min to pick a single value - doesn't matter since they are all the same) (neads dplyr & rearrr)
 ## Visualize cells after rotation (needs ggplot2)
 
-Rotation <- read_xlsx("Rotation&CC.xlsx")
+Rotation <- read_xlsx("Rotation&CC.xlsx") ## read an external csv script that contains x,y coordinates of the CC
 
 NT <- merge(NT, Rotation, by="Image", all.x=TRUE)
 
@@ -79,10 +77,10 @@ NT <- NT %>% group_by(Image) %>%
     ~ rotate_2d(data = ., degrees = mean(.[["Angle"]], na.rm = TRUE), x_col = "X", y_col = "Y", origin = c(0,0), suffix = '', overwrite = TRUE),
     .keep = TRUE
   ) %>% bind_rows()
-NT <- subset(NT, select = -c(Angle, .origin, .degrees))
+NT <- subset(NT, select = -c(Angle, .origin, .degrees)) ## ensure cells face the same way 
 rm(Rotation)
 
-ggplot(data = NT, aes(X, Y)) +
+ggplot(data = NT, aes(X, Y)) +  ## plot the location of the cells, these should be overlapping instead of spread out due to this normalisation, this might be code we delete for our V0d pipeline 
   geom_point(aes(color = Image), size = 0.5) +
   guides(color = guide_legend(ncol = 2)) +
   ggtitle("All cells (after rotation)")
@@ -100,11 +98,11 @@ ggplot(data = NT, aes(X, Y)) +
 ## Add column stating left/right depending on X coordinate, change X vlues to positives for left hemicords, rename "Image" to include hemicord info (needs dplyr)
 ## Visualize cells after hemicord split (needs ggplot2)
 
-NT %>% mutate(Hemicord = case_when(X >= 0 ~ "Right", X < 0 ~ "Left")) -> NT
+NT %>% mutate(Hemicord = case_when(X >= 0 ~ "Right", X < 0 ~ "Left")) -> NT ## seperate them based on x coordinate so greater or less than can correspond with hemicord location 
 NT %>% mutate(X = case_when(Hemicord == "Left" ~ X*(-1), Hemicord == "Right" ~ X)) -> NT
 NT %>% unite(Image, c(Image, Hemicord), sep = "_") -> NT
 
-ggplot(data = NT, aes(X, Y)) +
+ggplot(data = NT, aes(X, Y)) + ## plotting the split 
   geom_point(aes(color = Image), size = 0.5) +
   guides(color = guide_legend(ncol = 4)) +
   ggtitle("All cells (after hemicord split)")
@@ -123,7 +121,7 @@ ggplot(data = NT, aes(X, Y)) +
 ## Add columns for width & height factors and  normalize  X,Y coordinates, then visualize (needs dplyr & ggplot2)
 #(this doesn't work if the MASS package is loaded because it masks the 'select' function from the dplyr package)
 
-Size <- read_xlsx("Size_normalization.xlsx")
+Size <- read_xlsx("Size_normalization.xlsx") ## size normalisation of the x,y coordinates 
 
 NT <- merge(NT, Size %>% select(Image, Width, Height), by="Image", all.x=TRUE)
 
@@ -193,7 +191,7 @@ rm(Thresholds)
 
 ### REMOVE DETECTED CELLS DEPENDING ON SIZE
 
-## Delete cells that are smaller than 70 um2 (& bigger than 2500 um2?)
+## Delete cells that are smaller than 70 um2 (& bigger than 2500 um2?) ## what is this in reference to? 
 
 NT_thr <- subset(NT_thr, Area_um2 >= 70)
 #NT_thr <- subset(NT_thr, Area_um2 <= 2500)
@@ -226,9 +224,8 @@ NT_thr <- NT_thr %>% arrange(match(Timepoint, c("P30", "P63", "P112")), desc(Gro
 
 
 #####################################
-####   IDENTIFY POSITIVE CELLS   ####
+####   IDENTIFY POSITIVE CELLS   #### CHANGE FOR V0D, for our analysis would it make sense to actually identify more than just v0d? have other ones to identify so we can meanfully train the model?
 #####################################
-
 
 #### CREATE SUBSETS FOR EACH CELL TYPE (based on thresholds & coordinates)
 
@@ -247,6 +244,9 @@ Inhibitory <- subset(NT_thr, GlyT2_Intensity.mean >= GlyT2_low |
 
 Vglut2 <- subset(NT_thr, Vglut2_Intensity.mean >= Vglut2_low)
 Excitatory <- Vglut2
+
+
+
 
 
 ## Cholinergic
@@ -285,6 +285,18 @@ Pitx2 <- subset(NT_thr, Ptx2_Intensity.mean >= Ptx2_low & Ptx2_Intensity.mean < 
 V0_cg <- subset(Pitx2, Y >= 400 & Y <= 650 & X <= 200)
 V0_c <- subset(V0_cg, ChAT_Intensity.mean >= ChAT_low & ChAT_Intensity.mean < ChAT_high & ChAT_Intensity.std >= ChAT_SD)
 V0_g <- subset(V0_cg, Vglut2_Intensity.mean >= Vglut2_low)
+
+
+## V0D
+
+
+## we need to assign threshold for the lowest amount of intensity to detect this particular cell. 
+
+
+## VGAT
+## PAX2 
+## EVX1 
+## DBX1 
 
 
 
