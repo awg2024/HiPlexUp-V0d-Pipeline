@@ -18,6 +18,7 @@ import numpy as np
 import czifile
 import tifffile
 from PIL import Image
+import glob
 
 # colour keys 
 # PAX2 - megenta
@@ -25,9 +26,10 @@ from PIL import Image
 # DBX1 stained yellow
 # VGAT staomed green
 
-
 # Used only if a channel has no color stored in the metadata at all
-FALLBACK_COLOR = (255, 255, 255)  
+# (shouldn't normally happen for a properly-configured ZEN experiment,
+# but keeps the script from crashing if it does).
+FALLBACK_COLOR = (255, 255, 255)  # white / grayscale
 
 
 def parse_zen_color(hex_str):
@@ -221,9 +223,42 @@ def inspect_and_export(file_path):
     print("  - All colors above came from ZEN's saved metadata, not from a guess.")
 
 
+def find_czi_files(folder):
+    """Recursively find every .czi file under folder, sorted for consistent order."""
+    return sorted(glob.glob(os.path.join(folder, "**", "*.czi"), recursive=True))
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        path = sys.argv[1]
-    else:
-        path = input("Path to CZI file: ").strip('"')
-    inspect_and_export(path)
+    # Default target: every .czi under this folder, searched recursively
+    # (so Slide_139/, Slide_140/, etc. all get picked up automatically).
+    # Pass a different folder as a command-line argument to override it,
+    # e.g.: python read_czi.py /path/to/some/other/folder
+    target_folder = (
+        sys.argv[1]
+        if len(sys.argv) > 1
+        else "/home/gray2/Desktop/HiPlexUp/HiPlexUp-V0d-Pipeline/raw_czi"
+    )
+
+    files = find_czi_files(target_folder)
+    if not files:
+        print(f"No .czi files found under {target_folder}")
+        sys.exit(0)
+
+    print(f"Found {len(files)} CZI file(s) under {target_folder}\n")
+    failed = []
+    for i, path in enumerate(files, start=1):
+        print(f"\n{'#' * 60}\n[{i}/{len(files)}] {path}\n{'#' * 60}")
+        try:
+            inspect_and_export(path)
+        except Exception as e:
+            # Don't let one bad/corrupt file stop the whole batch --
+            # log it and keep going, report all failures at the end.
+            print(f"  ERROR processing {path}: {e}")
+            failed.append(path)
+
+    print(f"\n{'=' * 60}")
+    print(f"Batch complete: {len(files) - len(failed)}/{len(files)} succeeded")
+    if failed:
+        print("Failed files:")
+        for f in failed:
+            print(f"  - {f}")
