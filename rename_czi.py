@@ -1,7 +1,7 @@
 import os
 
 # Using the absolute path to eliminate any directory confusion
-target_folder = "/home/gray2/Desktop/HiPlexUp/HiPlexUp-V0d-Pipeline/raw_czi"
+target_folder = "/Users/angusgray/Desktop/V0d-Histology/HiPlexUp-V0d-Pipeline/raw_czi"
 
 def sanitize_filenames(folder_path, dry_run=True):
     if not os.path.exists(folder_path):
@@ -46,4 +46,4 @@ def sanitize_filenames(folder_path, dry_run=True):
 
 if __name__ == "__main__":
     # Test it with a dry run first!
-    sanitize_filenames(target_folder, dry_run=True)
+    sanitize_filenames(target_folder, dry_run=False)
