@@ -1,48 +1,62 @@
-#
-# this script is used for defining the tissue roi, classifying the spinal cord out of the imaging 
-#
-
-
-# input ->> tiffs 
-# output ->> tissue_masks/
-
-
 #!/usr/bin/env python3
 
 """
-tissue_roi.py
+run_cellpose.py
 
-Interactively define the tissue region to analyse in each converted
-16-bit TIFF.
+Run Cellpose segmentation on converted
+16-bit multichannel TIFF images.
 
-This script DOES NOT identify V0d cells.
-It simply defines the part of the image in which Cellpose is allowed
-to search for cells.
+Cellpose is used ONLY to answer:
+
+    "Where are the cells?"
+
+It does NOT classify V0d identity.
 
 Outputs
 -------
-tissue_masks/<stem>_tissue_mask.tif
-tissue_masks/<stem>_tissue_roi.json
-
-Modes
------
-interactive:
-    Manually draw a polygon around the tissue region.
-
-full:
-    Treat the whole image as the analysis region.
+masks/<stem>_cellpose_mask.tif
+masks/<stem>_cellpose_overlay.png
+masks/<stem>_cellpose_run.json
 
 Examples
 --------
-# Draw tissue ROI manually
-python tissue_roi.py converted_tiff/image.tif
 
-# Process all TIFFs in a directory
-python tissue_roi.py converted_tiff --output-dir tissue_masks
+# Use channel 1
+python run_cellpose.py \
+    converted_tiff/image.tif \
+    --channels 1
 
-# Analyse the full image -- no tissue exclusion
-python tissue_roi.py converted_tiff --mode full
+# Process a directory
+python run_cellpose.py \
+    converted_tiff \
+    --channels 1
+
+# Use two channels
+python run_cellpose.py \
+    converted_tiff \
+    --channels 1 3
+
+# Use tissue masks
+python run_cellpose.py \
+    converted_tiff \
+    --channels 1 \
+    --tissue-mask-dir tissue_masks
+
+# Try GPU / Apple MPS
+python run_cellpose.py \
+    converted_tiff \
+    --channels 1 \
+    --use-gpu
 """
+
+
+# do not start feeding in your four channels into cell pose
+# current cellpose-sam tkaes up the first three supplied channels and its documentation reccomends starting with the cytoplasmic/nuclear channels rather than simply giving its fluorescent stains 
+
+
+# what channels is VGAT? hmm let's get that classifed. 
+# python scripts/run_cellpose.py raw_png/...tif --channels vgat channel --use-gpu 
+
 
 from __future__ import annotations
 
@@ -51,17 +65,17 @@ import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.path import Path as MplPath
-from matplotlib.widgets import PolygonSelector
 import numpy as np
 import tifffile
 
+from cellpose import models
 
-def load_cyx(path: Path) -> np.ndarray:
+
+def load_cyx(
+    path: Path,
+) -> np.ndarray:
     """
-    Load TIFF and return array with shape:
-
-        C, Y, X
+    Return TIFF as C,Y,X.
     """
 
     arr = tifffile.imread(path)
@@ -71,29 +85,35 @@ def load_cyx(path: Path) -> np.ndarray:
 
     if arr.ndim != 3:
         raise ValueError(
-            f"{path}: expected 2D or 3D TIFF, got shape {arr.shape}"
+            f"{path}: expected 2D/3D TIFF, "
+            f"got {arr.shape}"
         )
 
-    # read_czi.py writes CYX.
     if arr.shape[0] <= 16:
         return arr
 
-    # Fallback in case TIFF happens to be YXC.
     if arr.shape[-1] <= 16:
-        return np.moveaxis(arr, -1, 0)
+        return np.moveaxis(
+            arr,
+            -1,
+            0,
+        )
 
     raise ValueError(
-        f"{path}: cannot determine channel axis from shape {arr.shape}"
+        f"{path}: cannot infer channel "
+        f"axis from shape {arr.shape}"
     )
 
 
 def stretch_to_8bit(
-    plane: np.ndarray,
-    lo_pct: float = 1,
-    hi_pct: float = 99,
-) -> np.ndarray:
+    plane,
+    lo_pct=1,
+    hi_pct=99,
+):
 
-    plane = plane.astype(np.float32)
+    plane = plane.astype(
+        np.float32
+    )
 
     lo, hi = np.percentile(
         plane,
@@ -101,208 +121,273 @@ def stretch_to_8bit(
     )
 
     if hi <= lo:
+
         return np.zeros(
             plane.shape,
             dtype=np.uint8,
         )
 
-    stretched = np.clip(
-        (plane - lo) / (hi - lo) * 255,
+    result = np.clip(
+        (plane - lo)
+        / (hi - lo)
+        * 255,
         0,
         255,
     )
 
-    return stretched.astype(np.uint8)
-
-
-def make_display(
-    stack: np.ndarray,
-    display_channel: int = 0,
-) -> np.ndarray:
-    """
-    Produce a display-only 8-bit image.
-
-    display_channel = 0
-        max projection of independently stretched channels
-
-    display_channel = 1, 2, ...
-        show one specific channel
-
-    This image is ONLY for drawing the ROI.
-    No measurements are taken from it.
-    """
-
-    if display_channel == 0:
-
-        stretched = [
-            stretch_to_8bit(channel)
-            for channel in stack
-        ]
-
-        return np.max(
-            np.stack(stretched, axis=0),
-            axis=0,
-        )
-
-    index = display_channel - 1
-
-    if index < 0 or index >= stack.shape[0]:
-        raise ValueError(
-            f"Requested display channel {display_channel}, "
-            f"but TIFF contains {stack.shape[0]} channels."
-        )
-
-    return stretch_to_8bit(
-        stack[index]
+    return result.astype(
+        np.uint8
     )
 
 
-def polygon_to_mask(
-    vertices,
-    shape,
-) -> np.ndarray:
-    """
-    Convert polygon XY vertices into a boolean YX mask.
-    """
-
-    yy, xx = np.mgrid[
-        :shape[0],
-        :shape[1],
-    ]
-
-    points = np.column_stack(
-        (
-            xx.ravel(),
-            yy.ravel(),
-        )
-    )
-
-    polygon = MplPath(vertices)
-
-    mask = polygon.contains_points(
-        points,
-        radius=0.5,
-    )
-
-    return mask.reshape(shape)
-
-
-def select_polygon(
-    display: np.ndarray,
-    title: str,
+def prepare_cellpose_input(
+    stack,
+    channels_1based,
 ):
     """
-    Interactive polygon selection.
+    Select 1-3 channels from the C,Y,X stack.
 
-    Controls
-    --------
-    Mouse:
-        place / adjust polygon vertices
+    Cellpose 4 no longer requires the old
+    channels=[cytoplasm, nucleus] argument.
 
-    ENTER:
-        accept ROI
-
-    ESC:
-        cancel this image
+    Instead, we construct the exact image channels
+    we want to send to Cellpose.
     """
 
-    state = {
-        "vertices": None,
-        "cancelled": False,
-    }
+    if not 1 <= len(channels_1based) <= 3:
 
-    fig, ax = plt.subplots(
-        figsize=(11, 8)
+        raise ValueError(
+            "Choose between 1 and 3 "
+            "channels for Cellpose."
+        )
+
+    indices = [
+        channel - 1
+        for channel
+        in channels_1based
+    ]
+
+    if (
+        min(indices) < 0
+        or max(indices) >= stack.shape[0]
+    ):
+
+        raise ValueError(
+            f"Requested channels "
+            f"{channels_1based}, "
+            f"but TIFF contains "
+            f"{stack.shape[0]} channels."
+        )
+
+    selected = stack[
+        indices
+    ]
+
+    # One-channel image.
+    if selected.shape[0] == 1:
+
+        return (
+            selected[0],
+            None,
+        )
+
+    # Convert C,Y,X -> Y,X,C
+    image = np.moveaxis(
+        selected,
+        0,
+        -1,
     )
 
-    ax.imshow(
-        display,
-        cmap="gray",
+    return (
+        image,
+        -1,
     )
 
-    ax.set_title(
-        f"{title}\n"
-        "Outline the tissue region. "
-        "Press ENTER to accept or ESC to cancel."
+
+def apply_tissue_mask(
+    image,
+    mask,
+):
+
+    if mask.shape != image.shape[:2]:
+
+        raise ValueError(
+            f"Tissue mask shape {mask.shape} "
+            f"does not match image XY "
+            f"{image.shape[:2]}"
+        )
+
+    output = image.copy()
+
+    if output.ndim == 2:
+
+        output[~mask] = 0
+
+    else:
+
+        output[~mask, :] = 0
+
+    return output
+
+
+def relabel_sequential(
+    mask,
+):
+    """
+    Ensure labels are:
+
+    0 = background
+    1 = cell 1
+    2 = cell 2
+    ...
+    """
+
+    labels = np.unique(mask)
+
+    labels = labels[
+        labels != 0
+    ]
+
+    output = np.zeros(
+        mask.shape,
+        dtype=np.uint32,
     )
 
-    ax.axis("off")
+    for new_id, old_id in enumerate(
+        labels,
+        start=1,
+    ):
 
-    selector = PolygonSelector(
-        ax,
-        lambda verts: None,
-        useblit=True,
+        output[
+            mask == old_id
+        ] = new_id
+
+    return output
+
+
+def mask_boundaries(
+    mask,
+):
+
+    boundaries = np.zeros(
+        mask.shape,
+        dtype=bool,
     )
 
-    def on_key(event):
-
-        if event.key in (
-            "enter",
-            "return",
-        ):
-
-            vertices = selector.verts
-
-            if (
-                vertices is not None
-                and len(vertices) >= 3
-            ):
-
-                state["vertices"] = [
-                    [float(x), float(y)]
-                    for x, y in vertices
-                ]
-
-                plt.close(fig)
-
-            else:
-                print(
-                    "Need at least three polygon "
-                    "vertices before accepting."
-                )
-
-        elif event.key == "escape":
-
-            state["cancelled"] = True
-            plt.close(fig)
-
-    fig.canvas.mpl_connect(
-        "key_press_event",
-        on_key,
+    boundaries[1:, :] |= (
+        mask[1:, :]
+        != mask[:-1, :]
     )
 
-    plt.tight_layout()
-    plt.show()
+    boundaries[:-1, :] |= (
+        mask[:-1, :]
+        != mask[1:, :]
+    )
 
-    if state["cancelled"]:
-        return None
+    boundaries[:, 1:] |= (
+        mask[:, 1:]
+        != mask[:, :-1]
+    )
 
-    return state["vertices"]
+    boundaries[:, :-1] |= (
+        mask[:, :-1]
+        != mask[:, 1:]
+    )
+
+    return (
+        boundaries
+        & (mask > 0)
+    )
+
+
+def save_overlay(
+    display_plane,
+    mask,
+    output_path,
+):
+    """
+    Save a QC image showing the Cellpose
+    boundaries over the fluorescence image.
+
+    This image is for QC only.
+    """
+
+    gray = stretch_to_8bit(
+        display_plane
+    )
+
+    rgb = np.repeat(
+        gray[..., None],
+        3,
+        axis=-1,
+    )
+
+    edges = mask_boundaries(
+        mask
+    )
+
+    rgb[edges] = np.array(
+        [255, 0, 0],
+        dtype=np.uint8,
+    )
+
+    plt.imsave(
+        output_path,
+        rgb,
+    )
 
 
 def find_tiffs(
-    input_path: Path,
+    input_path,
 ):
-    """
-    Find TIFFs recursively.
-    """
 
     if input_path.is_file():
         return [input_path]
 
     return sorted(
         path
-        for path in input_path.rglob("*.tif")
-        if "PREVIEW" not in path.name.upper()
+        for path
+        in input_path.rglob("*.tif")
+        if "PREVIEW"
+        not in path.name.upper()
+        and "MASK"
+        not in path.name.upper()
     )
 
 
+def find_tissue_mask(
+    tiff_path,
+    tissue_mask_dir,
+):
+
+    if tissue_mask_dir is None:
+        return None
+
+    candidate = (
+        tissue_mask_dir
+        / (
+            f"{tiff_path.stem}"
+            "_tissue_mask.tif"
+        )
+    )
+
+    if candidate.exists():
+        return candidate
+
+    return None
+
+
 def process_one(
-    tiff_path: Path,
-    output_dir: Path,
-    mode: str,
-    display_channel: int,
-    overwrite: bool,
+    tiff_path,
+    model,
+    output_dir,
+    channels,
+    tissue_mask_dir,
+    diameter,
+    flow_threshold,
+    cellprob_threshold,
+    min_size,
+    overwrite,
 ):
 
     output_dir.mkdir(
@@ -310,107 +395,201 @@ def process_one(
         exist_ok=True,
     )
 
-    stem = tiff_path.stem
-
     mask_path = (
         output_dir
-        / f"{stem}_tissue_mask.tif"
+        / (
+            f"{tiff_path.stem}"
+            "_cellpose_mask.tif"
+        )
     )
 
-    json_path = (
+    overlay_path = (
         output_dir
-        / f"{stem}_tissue_roi.json"
+        / (
+            f"{tiff_path.stem}"
+            "_cellpose_overlay.png"
+        )
+    )
+
+    run_path = (
+        output_dir
+        / (
+            f"{tiff_path.stem}"
+            "_cellpose_run.json"
+        )
     )
 
     if (
         mask_path.exists()
         and not overwrite
     ):
+
         print(
-            f"[SKIP] {mask_path} already exists"
+            f"[SKIP] {mask_path} "
+            "already exists"
         )
+
         return
 
     stack = load_cyx(
         tiff_path
     )
 
-    yx_shape = stack.shape[-2:]
-
-    if mode == "full":
-
-        mask = np.ones(
-            yx_shape,
-            dtype=bool,
-        )
-
-        vertices = None
-
-    else:
-
-        display = make_display(
+    cp_image, channel_axis = (
+        prepare_cellpose_input(
             stack,
-            display_channel,
+            channels,
+        )
+    )
+
+    tissue_mask_path = (
+        find_tissue_mask(
+            tiff_path,
+            tissue_mask_dir,
+        )
+    )
+
+    tissue_mask = None
+
+    if tissue_mask_path is not None:
+
+        tissue_mask = (
+            tifffile.imread(
+                tissue_mask_path
+            ).astype(bool)
         )
 
-        vertices = select_polygon(
-            display,
-            tiff_path.name,
+        cp_image = apply_tissue_mask(
+            cp_image,
+            tissue_mask,
         )
 
-        if vertices is None:
-
-            print(
-                f"[CANCELLED] {tiff_path.name}"
-            )
-
-            return
-
-        mask = polygon_to_mask(
-            vertices,
-            yx_shape,
+        print(
+            f"Using tissue mask: "
+            f"{tissue_mask_path}"
         )
+
+    elif tissue_mask_dir is not None:
+
+        print(
+            "[WARN] No tissue mask found "
+            f"for {tiff_path.name}. "
+            "Using full image."
+        )
+
+    masks, flows, styles = model.eval(
+
+        cp_image,
+
+        channel_axis=channel_axis,
+
+        diameter=diameter,
+
+        flow_threshold=flow_threshold,
+
+        cellprob_threshold=cellprob_threshold,
+
+        min_size=min_size,
+
+        normalize=True,
+    )
+
+    masks = np.asarray(
+        masks
+    )
+
+    # Enforce tissue region after segmentation.
+    if tissue_mask is not None:
+
+        masks = masks.copy()
+
+        masks[
+            ~tissue_mask
+        ] = 0
+
+    masks = relabel_sequential(
+        masks
+    )
 
     tifffile.imwrite(
+
         mask_path,
-        mask.astype(np.uint8),
+
+        masks.astype(
+            np.uint32
+        ),
+
         compression="zlib",
     )
 
-    metadata = {
+    # First selected channel used only
+    # as background for QC overlay.
+    display_plane = stack[
+        channels[0] - 1
+    ]
+
+    save_overlay(
+        display_plane,
+        masks,
+        overlay_path,
+    )
+
+    run_info = {
 
         "source_tiff":
             str(tiff_path),
 
-        "mode":
-            mode,
+        "channels_1_based":
+            channels,
 
-        "shape_yx":
-            list(yx_shape),
+        "n_cells":
+            int(masks.max()),
 
-        "display_channel_1_based":
-            display_channel,
+        "diameter":
+            diameter,
 
-        "vertices_xy":
-            vertices,
+        "flow_threshold":
+            flow_threshold,
 
-        "mask_pixels":
-            int(mask.sum()),
+        "cellprob_threshold":
+            cellprob_threshold,
+
+        "min_size_pixels":
+            min_size,
+
+        "tissue_mask":
+            (
+                str(tissue_mask_path)
+                if tissue_mask_path
+                else None
+            ),
+
+        "mask_path":
+            str(mask_path),
+
+        "overlay_path":
+            str(overlay_path),
     }
 
-    json_path.write_text(
+    run_path.write_text(
         json.dumps(
-            metadata,
+            run_info,
             indent=2,
         )
     )
 
     print(
-        f"[OK] Tissue mask: {mask_path}"
+        f"[OK] {tiff_path.name}: "
+        f"{int(masks.max())} "
+        "detected cell masks"
     )
 
     print(
-        f"[OK] ROI metadata: {json_path}"
+        f"     mask: {mask_path}"
+    )
+
+    print(
+        f"     overlay: {overlay_path}"
     )
 
 
@@ -422,33 +601,83 @@ def main():
         "input",
         type=Path,
         help=(
-            "One TIFF or a directory "
-            "containing converted TIFFs."
+            "One analysis TIFF or "
+            "directory of TIFFs."
         ),
     )
 
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("tissue_masks"),
+        default=Path("masks"),
     )
 
     parser.add_argument(
-        "--mode",
-        choices=(
-            "interactive",
-            "full",
-        ),
-        default="interactive",
-    )
-
-    parser.add_argument(
-        "--display-channel",
-        type=int,
-        default=0,
+        "--tissue-mask-dir",
+        type=Path,
+        default=None,
         help=(
-            "0 = max projection; "
-            "otherwise 1-based channel number."
+            "Directory produced by "
+            "tissue_roi.py. Optional."
+        ),
+    )
+
+    parser.add_argument(
+        "--channels",
+        type=int,
+        nargs="+",
+        required=True,
+        help=(
+            "1-based channel number(s). "
+            "Example: --channels 1 "
+            "or --channels 1 3"
+        ),
+    )
+
+    parser.add_argument(
+        "--model",
+        default="cpsam_v2",
+    )
+
+    parser.add_argument(
+        "--use-gpu",
+        action="store_true",
+        help=(
+            "Use available GPU / Apple "
+            "MPS acceleration."
+        ),
+    )
+
+    parser.add_argument(
+        "--diameter",
+        type=float,
+        default=None,
+        help=(
+            "Approximate cell diameter "
+            "in pixels. Initially leave "
+            "unset."
+        ),
+    )
+
+    parser.add_argument(
+        "--flow-threshold",
+        type=float,
+        default=0.4,
+    )
+
+    parser.add_argument(
+        "--cellprob-threshold",
+        type=float,
+        default=0.0,
+    )
+
+    parser.add_argument(
+        "--min-size",
+        type=int,
+        default=15,
+        help=(
+            "Minimum Cellpose mask size "
+            "in PIXELS, not um^2."
         ),
     )
 
@@ -464,10 +693,23 @@ def main():
     )
 
     if not files:
+
         raise SystemExit(
-            f"No TIFF files found under "
-            f"{args.input}"
+            f"No TIFF files found "
+            f"under {args.input}"
         )
+
+    print(
+        f"Loading Cellpose model: "
+        f"{args.model}"
+    )
+
+    model = models.CellposeModel(
+
+        gpu=args.use_gpu,
+
+        pretrained_model=args.model,
+    )
 
     print(
         f"Found {len(files)} TIFF(s)"
@@ -479,14 +721,33 @@ def main():
     ):
 
         print(
-            f"\n[{i}/{len(files)}] {path}"
+            f"\n[{i}/{len(files)}] "
+            f"{path}"
         )
 
         process_one(
+
             path,
+
+            model=model,
+
             output_dir=args.output_dir,
-            mode=args.mode,
-            display_channel=args.display_channel,
+
+            channels=args.channels,
+
+            tissue_mask_dir=
+                args.tissue_mask_dir,
+
+            diameter=args.diameter,
+
+            flow_threshold=
+                args.flow_threshold,
+
+            cellprob_threshold=
+                args.cellprob_threshold,
+
+            min_size=args.min_size,
+
             overwrite=args.overwrite,
         )
 
@@ -494,7 +755,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-    #python scripts/tissue_roi.py converted_tiff --mode full, analyse absolutely everything in these appropriately scenes 
-    #python scripts/tissue_roi.py converted_tiff, analyse grey matter 
-
-    
