@@ -21,6 +21,14 @@ import tifffile
 from PIL import Image
 import glob
 
+import argparse
+import csv
+import json
+
+import matplotlib.pyplot as plt 
+from matplotlib.path import Path as MplPath
+from matplotlib.widgets import PolygonSelector
+
 # colour keys for staining 
 # PAX2 - megenta
 # EVX1 stained cyan 
@@ -118,7 +126,12 @@ def build_lut(color):
     return lut # changes how the image looks in fiji without changing the source czi 
 
 
-def inspect_and_export(file_path):
+def inspect_and_export(
+    file_path,
+    select_background=False,
+    background_regions=1,
+    overwrite_background=False
+    ):
     """
     coordinator function acting as the main processor of czi reading and conversion 
     """
@@ -212,37 +225,619 @@ def inspect_and_export(file_path):
     print("  - *_PREVIEW_COMPOSITE.png                : 8-bit, quick visual check only.")
     print("  - All colors above came from ZEN's saved metadata, not from a guess.")
 
+    #--------------------------------------------------------------
+    # Optional interactive background measurement
+    # --------------------------------------------------------------
+
+    if select_background:
+
+        background_csv = os.path.join(
+            out_dir,
+            f"{base}_BACKGROUND.csv",
+        )
+
+        if (
+            os.path.exists(background_csv)
+            and not overwrite_background
+        ):
+
+            print(
+                "  Background already measured "
+                "-- skipping."
+            )
+
+        else:
+
+            background_mask, vertices = (
+                select_background_regions(
+                    stack,
+                    base,
+                    number_of_regions=
+                        background_regions,
+                )
+            )
+
+            if background_mask is None:
+
+                print(
+                    "  No background ROI saved."
+                )
+
+            else:
+
+                measurements = (
+                    measure_background(
+                        stack,
+                        background_mask,
+                        channel_names,
+                    )
+                )
+
+                save_background_results(
+                    out_dir,
+                    base,
+                    background_mask,
+                    vertices,
+                    measurements,
+                )
+
+                print(
+                    "\nBackground measurements:"
+                )
+
+                for row in measurements:
+
+                    print(
+                        f"  "
+                        f"{row['channel_name']}: "
+                        f"mean="
+                        f"{row['background_mean']:.2f}, "
+                        f"median="
+                        f"{row['background_median']:.2f}, "
+                        f"std="
+                        f"{row['background_std']:.2f}"
+                    )
+
 
 def find_czi_files(folder):
     """Recursively find every .czi file under folder, sorted for consistent order for batch processing. """
     return sorted(glob.glob(os.path.join(folder, "**", "*.czi"), recursive=True))
 
 
-if __name__ == "__main__":
-    
-    # Default target: every .czi under this folder, searched recursively
-    target_folder = (sys.argv[1] if len(sys.argv) > 1 else "/home/gray2/Desktop/HiPlexUp/HiPlexUp-V0d-Pipeline/raw_czi")
+def make_background_display(stack):
+    """
+    Create a display-only image for selecting background.
 
-    files = find_czi_files(target_folder)
+    Each channel is independently contrast stretched
+    before taking the maximum projection.
+
+    IMPORTANT:
+    Measurements are NOT made from this image.
+    """
+
+    display_channels = []
+
+    for plane in stack:
+
+        display_channels.append(
+            stretch_to_8bit(plane)
+        )
+
+    return np.max(
+        np.stack(
+            display_channels,
+            axis=0,
+        ),
+        axis=0,
+    )
+
+
+def polygon_to_mask(
+    vertices,
+    shape,
+):
+
+    yy, xx = np.mgrid[
+        :shape[0],
+        :shape[1],
+    ]
+
+    points = np.column_stack(
+        (
+            xx.ravel(),
+            yy.ravel(),
+        )
+    )
+
+    polygon = MplPath(
+        vertices
+    )
+
+    mask = polygon.contains_points(
+        points,
+        radius=0.5,
+    )
+
+    return mask.reshape(
+        shape
+    )
+
+
+def select_background_polygon(
+    display,
+    title,
+):
+    """
+    Interactively draw one background ROI.
+
+    ENTER = accept
+    ESC   = cancel
+    """
+
+    state = {
+        "vertices": None,
+        "cancelled": False,
+    }
+
+    fig, ax = plt.subplots(
+        figsize=(11, 8)
+    )
+
+    ax.imshow(
+        display,
+        cmap="gray",
+    )
+
+    ax.set_title(
+        f"{title}\n"
+        "Select a representative tissue-background "
+        "region with no obvious positive cells.\n"
+        "Press ENTER to accept or ESC to cancel."
+    )
+
+    ax.axis("off")
+
+    selector = PolygonSelector(
+        ax,
+        lambda verts: None,
+        useblit=True,
+    )
+
+    def on_key(event):
+
+        if event.key in (
+            "enter",
+            "return",
+        ):
+
+            vertices = selector.verts
+
+            if (
+                vertices is not None
+                and len(vertices) >= 3
+            ):
+
+                state["vertices"] = [
+                    [float(x), float(y)]
+                    for x, y in vertices
+                ]
+
+                plt.close(fig)
+
+        elif event.key == "escape":
+
+            state["cancelled"] = True
+
+            plt.close(fig)
+
+    fig.canvas.mpl_connect(
+        "key_press_event",
+        on_key,
+    )
+
+    plt.tight_layout()
+    plt.show()
+
+    if state["cancelled"]:
+
+        return None
+
+    return state["vertices"]
+
+
+def select_background_regions(
+    stack,
+    title,
+    number_of_regions=1,
+):
+    """
+    Allow one or more background regions to be selected.
+
+    Returns
+    -------
+    combined_mask
+        Boolean mask covering all selected background pixels.
+
+    all_vertices
+        Polygon coordinates for reproducibility.
+    """
+
+    display = make_background_display(
+        stack
+    )
+
+    combined_mask = np.zeros(
+        stack.shape[-2:],
+        dtype=bool,
+    )
+
+    all_vertices = []
+
+    for region_number in range(
+        1,
+        number_of_regions + 1,
+    ):
+
+        print(
+            f"Select background region "
+            f"{region_number}/"
+            f"{number_of_regions}"
+        )
+
+        vertices = select_background_polygon(
+
+            display,
+
+            (
+                f"{title} — Background "
+                f"{region_number}/"
+                f"{number_of_regions}"
+            ),
+        )
+
+        if vertices is None:
+
+            print(
+                "Background selection cancelled."
+            )
+
+            break
+
+        region_mask = polygon_to_mask(
+
+            vertices,
+
+            stack.shape[-2:],
+        )
+
+        combined_mask |= region_mask
+
+        all_vertices.append(
+            vertices
+        )
+
+    if not combined_mask.any():
+
+        return None, []
+
+    return (
+        combined_mask,
+        all_vertices,
+    )
+
+
+def measure_background(
+    stack,
+    background_mask,
+    channel_names,
+):
+    """
+    Measure ORIGINAL 16-bit fluorescence values
+    inside the selected background mask.
+    """
+
+    results = []
+
+    for index, (
+        plane,
+        channel_name,
+    ) in enumerate(
+        zip(
+            stack,
+            channel_names,
+        ),
+        start=1,
+    ):
+
+        values = plane[
+            background_mask
+        ].astype(np.float64)
+
+        results.append(
+            {
+                "channel_index":
+                    index,
+
+                "channel_name":
+                    channel_name,
+
+                "n_pixels":
+                    int(values.size),
+
+                "background_mean":
+                    float(
+                        np.mean(values)
+                    ),
+
+                "background_median":
+                    float(
+                        np.median(values)
+                    ),
+
+                "background_std":
+                    float(
+                        np.std(values)
+                    ),
+
+                "background_min":
+                    float(
+                        np.min(values)
+                    ),
+
+                "background_max":
+                    float(
+                        np.max(values)
+                    ),
+            }
+        )
+
+    return results
+
+
+def save_background_results(
+    out_dir,
+    base,
+    background_mask,
+    vertices,
+    measurements,
+):
+    """
+    Save:
+      1. background ROI mask
+      2. polygon coordinates
+      3. per-channel measurements
+    """
+
+    mask_path = os.path.join(
+        out_dir,
+        f"{base}_BACKGROUND_MASK.tif",
+    )
+
+    json_path = os.path.join(
+        out_dir,
+        f"{base}_BACKGROUND_ROI.json",
+    )
+
+    csv_path = os.path.join(
+        out_dir,
+        f"{base}_BACKGROUND.csv",
+    )
+
+    tifffile.imwrite(
+
+        mask_path,
+
+        background_mask.astype(
+            np.uint8
+        ),
+
+        compression="zlib",
+    )
+
+    with open(
+        json_path,
+        "w",
+    ) as handle:
+
+        json.dump(
+            {
+                "regions_xy":
+                    vertices,
+
+                "number_of_regions":
+                    len(vertices),
+
+                "mask_pixels":
+                    int(
+                        background_mask.sum()
+                    ),
+            },
+            handle,
+            indent=2,
+        )
+
+    with open(
+        csv_path,
+        "w",
+        newline="",
+    ) as handle:
+
+        writer = csv.DictWriter(
+
+            handle,
+
+            fieldnames=[
+                "channel_index",
+                "channel_name",
+                "n_pixels",
+                "background_mean",
+                "background_median",
+                "background_std",
+                "background_min",
+                "background_max",
+            ],
+        )
+
+        writer.writeheader()
+
+        writer.writerows(
+            measurements
+        )
+
+    print(
+        f"  background mask: {mask_path}"
+    )
+
+    print(
+        f"  background data: {csv_path}"
+    )
+
+    print(
+        f"  background ROI:  {json_path}"
+    )
+
+
+
+
+# main 
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "target",
+        nargs="?",
+        default=(
+            "/Users/angusgray/Desktop/"
+            "V0d-Histology/"
+            "HiPlexUp-V0d-Pipeline/"
+            "raw_czi"
+        ),
+        help=(
+            "A single CZI file or a "
+            "directory containing CZI files."
+        ),
+    )
+
+    parser.add_argument(
+        "--select-background",
+        action="store_true",
+        help=(
+            "Interactively select tissue "
+            "background regions for each image."
+        ),
+    )
+
+    parser.add_argument(
+        "--background-regions",
+        type=int,
+        default=1,
+        help=(
+            "Number of background regions "
+            "to select per image."
+        ),
+    )
+
+    parser.add_argument(
+        "--overwrite-background",
+        action="store_true",
+    )
+
+    args = parser.parse_args()
+
+    if os.path.isfile(args.target):
+
+        if not args.target.lower().endswith(
+            ".czi"
+        ):
+
+            raise SystemExit(
+                "Input file is not a CZI."
+            )
+
+        files = [
+            args.target
+        ]
+
+    else:
+
+        files = find_czi_files(
+            args.target
+        )
+
     if not files:
-        print(f"No .czi files found under {target_folder}")
+
+        print(
+            f"No .czi files found "
+            f"under {args.target}"
+        )
+
         sys.exit(0)
 
-    print(f"Found {len(files)} CZI file(s) under {target_folder}\n")
-    failed = []
-    for i, path in enumerate(files, start=1):
-        print(f"\n{'#' * 60}\n[{i}/{len(files)}] {path}\n{'#' * 60}")
-        try:
-            inspect_and_export(path)
-        except Exception as e:
-            # Don't let one bad/corrupt file stop the whole batch --
-            # log it and keep going, report all failures at the end.
-            print(f"  ERROR processing {path}: {e}")
-            failed.append(path)
+    print(
+        f"Found {len(files)} "
+        "CZI file(s)\n"
+    )
 
-    print(f"\n{'=' * 60}")
-    print(f"Batch complete: {len(files) - len(failed)}/{len(files)} succeeded")
+    failed = []
+
+    for i, path in enumerate(
+        files,
+        start=1,
+    ):
+
+        print(
+            f"\n{'#' * 60}"
+            f"\n[{i}/{len(files)}] "
+            f"{path}"
+            f"\n{'#' * 60}"
+        )
+
+        try:
+
+            inspect_and_export(
+
+                path,
+
+                select_background=
+                    args.select_background,
+
+                background_regions=
+                    args.background_regions,
+
+                overwrite_background=
+                    args.overwrite_background,
+            )
+
+        except Exception as error:
+
+            print(
+                f"ERROR processing "
+                f"{path}: {error}"
+            )
+
+            failed.append(
+                path
+            )
+
+    print(
+        f"\n{'=' * 60}"
+    )
+
+    print(
+        f"Batch complete: "
+        f"{len(files) - len(failed)}/"
+        f"{len(files)} succeeded"
+    )
+
     if failed:
-        print("Failed files:")
-        for f in failed:
-            print(f"  - {f}")
+
+        print(
+            "Failed files:"
+        )
+
+        for path in failed:
+
+            print(
+                f"  - {path}"
+            )
