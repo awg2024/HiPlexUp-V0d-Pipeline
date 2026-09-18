@@ -1,23 +1,5 @@
-#
-# this script is used for defining the tissue roi, classifying the spinal cord out of the imaging 
-#
-
-# whole_image input -> spinal gray matter region selected by user -> Fiji Output ROI files
-
-#
-# this script is used for defining the tissue roi, classifying the spinal cord out of the imaging 
-#
-
-
-# input ->> tiffs 
-# output ->> tissue_masks/
-
-
-#!/usr/bin/env python3
 
 """
-tissue_roi.py
-
 Interactively define the tissue region to analyse in each converted
 16-bit TIFF.
 
@@ -25,21 +7,19 @@ This script DOES NOT identify V0d cells.
 It simply defines the part of the image in which Cellpose is allowed
 to search for cells.
 
-Outputs
--------
+Outputs;;
 tissue_masks/<stem>_tissue_mask.tif
 tissue_masks/<stem>_tissue_roi.json
 
-Modes
------
+Modes;; 
 interactive:
     Manually draw a polygon around the tissue region.
 
 full:
     Treat the whole image as the analysis region.
 
-Examples
---------
+Examples on how to use this script: 
+
 # Draw tissue ROI manually
 python tissue_roi.py converted_tiff/image.tif
 
@@ -48,6 +28,7 @@ python tissue_roi.py converted_tiff --output-dir tissue_masks
 
 # Analyse the full image -- no tissue exclusion
 python tissue_roi.py converted_tiff --mode full
+
 """
 
 from __future__ import annotations
@@ -77,8 +58,7 @@ def load_cyx(path: Path) -> np.ndarray:
 
     if arr.ndim != 3:
         raise ValueError(
-            f"{path}: expected 2D or 3D TIFF, got shape {arr.shape}"
-        )
+            f"{path}: expected 2D or 3D TIFF, got shape {arr.shape}")
 
     # read_czi.py writes CYX.
     if arr.shape[0] <= 16:
@@ -88,35 +68,21 @@ def load_cyx(path: Path) -> np.ndarray:
     if arr.shape[-1] <= 16:
         return np.moveaxis(arr, -1, 0)
 
-    raise ValueError(
-        f"{path}: cannot determine channel axis from shape {arr.shape}"
-    )
+    raise ValueError(f"{path}: cannot determine channel axis from shape {arr.shape}")
 
-
-def stretch_to_8bit(
-    plane: np.ndarray,
-    lo_pct: float = 1,
-    hi_pct: float = 99,
-) -> np.ndarray:
+def stretch_to_8bit(plane: np.ndarray,lo_pct: float = 1,hi_pct: float = 99) -> np.ndarray:
+    """ 
+    Same helper function utilised in read_czi.py to stretch the image out to an 8-bit for the user viewing. 
+    """
 
     plane = plane.astype(np.float32)
 
-    lo, hi = np.percentile(
-        plane,
-        (lo_pct, hi_pct),
-    )
+    lo, hi = np.percentile(plane,(lo_pct, hi_pct))
 
     if hi <= lo:
-        return np.zeros(
-            plane.shape,
-            dtype=np.uint8,
-        )
+        return np.zeros(plane.shape,dtype=np.uint8)
 
-    stretched = np.clip(
-        (plane - lo) / (hi - lo) * 255,
-        0,
-        255,
-    )
+    stretched = np.clip((plane - lo) / (hi - lo) * 255,0,255)
 
     return stretched.astype(np.uint8)
 

@@ -6,11 +6,7 @@ run_cellpose.py
 Run Cellpose segmentation on converted
 16-bit multichannel TIFF images.
 
-Cellpose is used ONLY to answer:
-
-    "Where are the cells?"
-
-It does NOT classify V0d identity.
+Cellpose in this V0d hisotological workflow will be ran on the VGAT (channel 5) 
 
 Outputs
 -------
@@ -24,7 +20,7 @@ Examples
 # Use channel 1
 python run_cellpose.py \
     converted_tiff/image.tif \
-    --channels 1
+    --channels 5
 
 # Process a directory
 python run_cellpose.py \
@@ -36,7 +32,7 @@ python run_cellpose.py \
     converted_tiff \
     --channels 1 3
 
-# Use tissue masks
+# Use tissue masks ROI!!
 python run_cellpose.py \
     converted_tiff \
     --channels 1 \
