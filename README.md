@@ -25,4 +25,20 @@ The aim of this repository is to identify and quantify V0d interneurons from mul
 
 19. HiPlexUP spatial and quantitative analysis. `Montañana-Rosell_et_al_2023__HiPlexUp.R` this script will be adapted with our new found thresholds to identify v0d cells, and then to count for WT, SOD1, but apart from that it will remain largely unchanged. This pipeline contains methods for assigning animal id, coordinate transform, spinal cord rotation, left/right hemicord normalisation, tissue size normalisation, cell-size filtering, marker-based population analysis, cell counting, spatial plotting. The existing HiPlexUP workflow therefore provides the downstream spatial analysis framework rather than having to recreate this analysis from scratch.
 
-20. `publication_plotting.py` this will take in some neccessary csv and plot for the publication in a svg format for inkscape adjustment for the panel. We want to have WT/SOD1 V0D cell counts and intensity in the end result. 
+20. `publication_plotting.py` this will take in some neccessary csv and plot for the publication in a svg format for inkscape adjustment for the panel. We want to have WT/SOD1 V0D cell counts and intensity in the end result.
+
+# Channels/Color keys for Staining
+ 
+EVX1 - cyan (channel 1 or 2?) 
+Channel 1 stained dark blue dots, Channel 2 seems like a tissue autofluorescence?) 
+
+PAX2 - megenta (channel 3) 
+DBX1 - yellow (channel 4) 
+VGAT - green (channel 5) 
+
+
+
+
+
+
+
