@@ -26,26 +26,58 @@ import csv
 import json
 import matplotlib.pyplot as plt 
 
+CHANNEL_CONFIG = {
+    "DAPI": {
+        "index": 0,
+        "channel_number": 1,
+        "color": (0, 0, 255),        # blue
+    },
+    "EVX1": {
+        "index": 1,
+        "channel_number": 2,
+        "color": (0, 255, 255),      # cyan
+    },
+    "PAX2": {
+        "index": 2,
+        "channel_number": 3,
+        "color": (255, 0, 255),      # magenta
+    },
+    "DBX1": {
+        "index": 3,
+        "channel_number": 4,
+        "color": (255, 255, 0),      # yellow
+    },
+    "VGAT": {
+        "index": 4,
+        "channel_number": 5,
+        "color": (0, 255, 0),        # green
+    },
+}
 
-# channel_conversion = {
-#     "DAPI": "",
-#     "AF488": "",
-#     "AF555_2": "PAX2",
-#     "AF660": "DBX1",
-#     "AF751": "VGAT"
-# }
+# if enable_background flag is activated, collect fluorescence from each channel x,y 
+BACKGROUND_POINTS = {
+    "DAPI": {"x": 8101, "y": 5102}, # TO DO COLLECT X,Y COORDS .
+    "EVX1": {"x": 7964, "y": 4981},
+    "PAX2": {"x": 8180, "y": 5055},
+    "DBX1": {"x": 8022, "y": 5110},
+    "VGAT": {"x": 8138, "y": 4923}}
 
 
+CHANNEL_NAMES = list(CHANNEL_CONFIG.keys())
+FALLBACK_COLOR = (255, 255, 255)    # fallback color if color in metadata 
 
-# fallback color if color in metadata 
-FALLBACK_COLOR = (255, 255, 255)  # white / grayscale
+
+# 0 = exactly one pixel
+# 1 = 3x3 patch around selected point
+# 2 = 5x5 patch around selected point
+BACKGROUND_PATCH_RADIUS = 3
+
 
 def parse_zen_color(hex_str):
     """
     Function to handle ZEN stores channel colors as a hex string, typically ARGB
     (e.g. '#FF00FF00' = full alpha, green) or as a plain RGB ('#00FF00'). 
     """
-
     if not hex_str:
         return None
     
@@ -142,10 +174,14 @@ def inspect_and_export(file_path,select_background=False,background_regions=1,ov
 
     print("Reading CZI array...")
    
-    with czifile.CziFile(file_path) as czi:
+    with czifile.CziFile(file_path) as czi:  #  with a singular czi file open... 
         arr = czi.asarray()
         squeezed = np.squeeze(arr)
         num_channels = squeezed.shape[0] if squeezed.ndim == 3 else 1  # enforce 3 dimensions 
+        
+        if num_channels != 5: 
+            raise RuntimeError("Expected exactly 5 channels from the .czi file") # expect 5 channels exactly given our hard-coded dict. 
+        
         channel_info = get_channel_info(czi, num_channels) #  pull names and colors of channels 
 
         print(f"[INFO] File: {file_path}")
@@ -156,26 +192,20 @@ def inspect_and_export(file_path,select_background=False,background_regions=1,ov
         return
 
     planes = [squeezed[i].astype(np.uint16) for i in range(num_channels)]
-    channel_names = []
-    channel_colors = []
-    for i in range(num_channels):
-        if i < len(channel_info):
-            name, color = channel_info[i]
-        else:
-            name, color = None, None
-        channel_names.append(name or f"ch{i+1}")
-        channel_colors.append(color or FALLBACK_COLOR) 
+   
+    # Biological channel identity is fixed by acquisition order.
+    channel_names = CHANNEL_NAMES.copy()
 
-    print("\nChannel colors (read from ZEN's own saved metadata, not guessed):")
-    for i, (name, color) in enumerate(zip(channel_names, channel_colors)):
-        if i < len(channel_info) and channel_info[i][1] is not None:
-            source = "from metadata"
-        else:
-            source = "FALLBACK -- not found in metadata"
-        print(f"  ch{i+1} ({name}): RGB{color}  [{source}]")
+    channel_colors = [CHANNEL_CONFIG[name]["color"] for name in channel_names]  # pull out channel colour from dict 
+
+    print("\nConfirmed biological channel mapping:")
+
+    for name in channel_names:  # debugging terminal for channel name / rgb 
+        config = CHANNEL_CONFIG[name]
+        print(f"  Channel {config['channel_number']}: {name} (NumPy index {config['index']}) RGB{config['color']}")
+
 
     # Build one full-resolution 16-bit multichannel stack.
-    # Pixel values remain unchanged.
     stack = np.stack(planes, axis=0)  # (C, Y, X)
 
     # Save one losslessly compressed Fiji-ready 16-bit TIFF.
@@ -202,8 +232,9 @@ def inspect_and_export(file_path,select_background=False,background_regions=1,ov
     print("Pixel verification: PASS — TIFF matches source exactly.")
 
     # Preview composite image 8-bit, using ZEN's real colors, display only.
-    print(f"\n--- Preview overlay (8-bit, display only, NOT for measurements) ---")
+    print(f"Preview overlay (8-bit) (for QC-checks)")
     composite = np.zeros((*planes[0].shape, 3), dtype=np.uint8)
+    
     for plane, color in zip(planes, channel_colors):
         stretched8 = stretch_to_8bit(plane)
         tinted = np.zeros((*stretched8.shape, 3), dtype=np.uint8)
@@ -215,38 +246,27 @@ def inspect_and_export(file_path,select_background=False,background_regions=1,ov
     Image.fromarray(composite).save(out_preview)
     print(f"  {out_preview}")
 
-    print("\nSummary:")
-    print("  - *_ALLCHANNELS_16bit_FIJI.tif           : same data, opens pre-colored in Fiji.")
-    print("  - *_PREVIEW_COMPOSITE.png                : 8-bit, quick visual check only.")
-    print("  - All colors above came from ZEN's saved metadata, not from a guess.")
+    if select_background:
 
-    if select_background: # if we have activated the background flag measurement 
-        
+        print("Measuring channel-specific background fluorescence")
         background_csv = os.path.join(out_dir,f"{base}_BACKGROUND.csv")
-        
-        if (os.path.exists(background_csv) and not overwrite_background): # guard so we dont have to do the entire process again if background csv exists 
-            print("  Background already measured, skipping")
-        
+
+        if (os.path.exists(background_csv) and not overwrite_background):
+            print("Background already measured, skipping.")
+
         else:
-            points = select_background_points(stack, base, number_of_points=background_regions)
 
-            if not points:
-                print("No background points saved.")
+            measurements = measure_background_from_coordinates(stack=stack, background_points=BACKGROUND_POINTS, patch_radius=BACKGROUND_PATCH_RADIUS)
+            save_background_measurements(out_dir=out_dir,base=base,measurements=measurements)
 
-            else:
-                measurements = measure_background_points(stack, points, channel_names)
-                save_background_results_points(out_dir, base, points, measurements)
+            print("Background measurements from original 16-bit pixels:")
 
-                print("Background measurements:")
-                for row in measurements:
-                    print(
-                        f"{row['channel_name']}: "
-                        f"mean="
-                        f"{row['background_mean']:.2f}, "
-                        f"median="
-                        f"{row['background_median']:.2f}, "
-                        f"std="
-                        f"{row['background_std']:.2f}")
+            for row in measurements:
+                print(
+                    f"  {row['channel_name']:<5} "
+                    f"Ch{row['channel_number']}  "
+                    f"XY=({row['x_pixel']}, {row['y_pixel']})"
+                    f"value/mean={row['background_mean']:.2f}")
 
 
 def find_czi_files(folder):
@@ -293,212 +313,103 @@ def select_background_point(display, title):
     return int(round(x)), int(round(y))
  
  
-
-
-def measure_background_points(stack, points, channel_names, patch_radius=0):
+ def measure_background_from_coordinates(stack, background_points, patch_radius=0):
     """
-    Measure ORIGINAL 16-bit fluorescence values at each clicked point,
-    per channel.
-
-    patch_radius=0  -> use the exact single pixel clicked
-    patch_radius=N  -> average a (2N+1) x (2N+1) patch centered on the
-                       click, which is less noisy than a lone pixel
+    Measure background fluorescence independently for each biological channel.
+    Each channel has its own Fiji-selected X/Y coordinate hard-coded at the start of the script. 
+    Returns ->> list of dictionaries containing per-channel background measurements.
     """
 
+    height = stack.shape[1]
+    width = stack.shape[2]
     results = []
-    height, width = stack.shape[-2:]
 
-    for index, (plane, channel_name) in enumerate(
-        zip(stack, channel_names), start=1
-    ):
-        point_values = []
+    for channel_name, config in CHANNEL_CONFIG.items():
+        channel_index = config["index"]
 
-        for x, y in points:
-            if patch_radius == 0:
-                point_values.append(float(plane[y, x]))
-            else:
-                y0, y1 = max(0, y - patch_radius), min(height, y + patch_radius + 1)
-                x0, x1 = max(0, x - patch_radius), min(width, x + patch_radius + 1)
-                patch = plane[y0:y1, x0:x1].astype(np.float64)
-                point_values.append(float(np.mean(patch)))
+        if channel_name not in background_points:
+            raise ValueError(f"No background coordinate provided for {channel_name}")
 
-        results.append(
-            {
-                "channel_index": index,
-                "channel_name": channel_name,
-                "n_points": len(point_values),
-                "point_values": point_values,
-                "background_mean": float(np.mean(point_values)),
-                "background_median": float(np.median(point_values)),
-                "background_std": float(np.std(point_values))})
+        x = int(background_points[channel_name]["x"]) # collect x,y coordinates definted by user 
+        y = int(background_points[channel_name]["y"])
+
+        # Make sure coordinate is inside image.
+        if not (0 <= x < width and 0 <= y < height):
+            raise ValueError(
+                f"{channel_name} background point "
+                f"(x={x}, y={y}) is outside image dimensions "
+                f"{width} x {height}")
+        plane = stack[channel_index]
+
+        if patch_radius == 0:
+            values = np.array([plane[y, x]],dtype=np.float64)  # radius point we collect one pixel if set to 0
+
+        else:
+            x0 = max(0, x - patch_radius) # adjust x,y based on patch_radius and collect min max
+            x1 = min(width, x + patch_radius + 1)
+            y0 = max(0, y - patch_radius)
+            y1 = min(height, y + patch_radius + 1)
+            values = plane[y0:y1,x0:x1].astype(np.float64).ravel()
+
+        results.append({ # save all results 
+                "channel_number":config["channel_number"],
+                "channel_name":channel_name,
+                "channel_index":channel_index,
+                "x_pixel":x,
+                "y_pixel":y,
+                "patch_radius":patch_radius,
+                "n_pixels":int(values.size),
+                "background_mean": float(np.mean(values)), 
+                "background_median":float(np.median(values)),
+                "background_std":float(np.std(values)),
+                "background_min":float(np.min(values)),
+                "background_max":float(np.max(values))})
 
     return results
 
-def select_background_points(stack, title, number_of_points=1):
-    """
-    Let the user click one or more background points.
-    Returns a list of (x, y) integer pixel coordinates.
-    """
- 
-    display = make_background_display(stack)  # reuse existing helper
-    points = []
- 
-    for point_number in range(1, number_of_points + 1):
-        print(f"Click background point {point_number}/{number_of_points}")
- 
-        point = select_background_point(
-            display,
-            f"{title} — Background point {point_number}/{number_of_points}",
-        )
- 
-        if point is None:
-            print("Background selection cancelled.")
-            break
- 
-        points.append(point)
- 
-    return points
 
- 
-def save_background_results_points(out_dir, base, points, measurements, patch_radius=0):
+
+def save_background_measurements(out_dir, base, measurements):
     """
-    Save:
-      1. clicked point coordinates (+ patch radius used)
-      2. per-channel measurements
-    No mask TIFF needed anymore since there's no region to visualize.
+    Save the Fiji-selected coordinates and corresponding original
+    16-bit fluorescence measurements.
     """
 
-    json_path = os.path.join(out_dir, f"{base}_BACKGROUND_POINTS.json")
-    csv_path = os.path.join(out_dir, f"{base}_BACKGROUND.csv")
 
-    with open(json_path, "w") as handle:
-        json.dump(
-            {
-                "points_xy": points,
-                "number_of_points": len(points),
-                "patch_radius": patch_radius,
-            },
-            handle,
-            indent=2,
-        )
+    csv_path = os.path.join(out_dir,f"{base}_BACKGROUND.csv")
+    json_path = os.path.join(out_dir, f"{base}_BACKGROUND.json")
 
     fieldnames = [
-        "channel_index",
+        "channel_number",
         "channel_name",
-        "n_points",
+        "channel_index",
+        "x_pixel",
+        "y_pixel",
+        "patch_radius",
+        "n_pixels",
         "background_mean",
         "background_median",
         "background_std",
-    ]
+        "background_min",
+        "background_max"]
 
-    with open(csv_path, "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+    with open(csv_path,"w",newline="",) as handle:  # handle csv writing over 
+
+        writer = csv.DictWriter(handle,fieldnames=fieldnames)
         writer.writeheader()
-        for row in measurements:
-            writer.writerow({key: row[key] for key in fieldnames})
+        writer.writerows(measurements)
 
-    print(f"  background points: {json_path}")
-    print(f"  background data:   {csv_path}")
+    with open(json_path,"w") as handle:
 
+        json.dump({
+                "source_image":base,
+                "background_points":BACKGROUND_POINTS,
+                "patch_radius":BACKGROUND_PATCH_RADIUS,
+                "measurements": measurements},handle,indent=2)
 
+    print(f"Background CSV:{csv_path}")
+    print(f"Background JSON: {json_path}")
 
-
-
-
-
-def save_background_results(
-    out_dir,
-    base,
-    background_mask,
-    vertices,
-    measurements,
-):
-    """
-    Save:
-      1. background ROI mask
-      2. polygon coordinates
-      3. per-channel measurements
-    """
-
-    mask_path = os.path.join(
-        out_dir,
-        f"{base}_BACKGROUND_MASK.tif",
-    )
-
-    json_path = os.path.join(
-        out_dir,
-        f"{base}_BACKGROUND_ROI.json",
-    )
-
-    csv_path = os.path.join(
-        out_dir,
-        f"{base}_BACKGROUND.csv",
-    )
-
-    tifffile.imwrite(
-
-        mask_path,
-
-        background_mask.astype(
-            np.uint8
-        ),
-
-        compression="zlib",
-    )
-
-    with open(
-        json_path,
-        "w",
-    ) as handle:
-
-        json.dump(
-            {
-                "regions_xy":
-                    vertices,
-
-                "number_of_regions":
-                    len(vertices),
-
-                "mask_pixels":
-                    int(
-                        background_mask.sum()
-                    ),
-            },
-            handle,
-            indent=2,
-        )
-
-    with open(
-        csv_path,
-        "w",
-        newline="",
-    ) as handle:
-
-        writer = csv.DictWriter(
-
-            handle,
-
-            fieldnames=[
-                "channel_index",
-                "channel_name",
-                "n_pixels",
-                "background_mean",
-                "background_median",
-                "background_std",
-                "background_min",
-                "background_max",
-            ],
-        )
-
-        writer.writeheader()
-
-        writer.writerows(
-            measurements
-        )
-
-    print(f"  background mask: {mask_path}")
-    print(f"  background data: {csv_path}")
-    print(f"  background ROI:  {json_path}")
 
 # main caller 
 if __name__ == "__main__":
