@@ -67,6 +67,8 @@ def load_cyx(path: Path) -> np.ndarray:
 
     raise ValueError(f"{path}: cannot determine channel axis from shape {arr.shape}")
 
+
+
 def stretch_to_8bit(plane: np.ndarray,lo_pct: float = 1,hi_pct: float = 99) -> np.ndarray:
     """ 
     Same helper function utilised in read_czi.py to stretch the image out to an 8-bit for the user viewing. 
@@ -194,6 +196,9 @@ def find_tiffs(input_path: Path):
 
 
 def process_one(tiff_path: Path,output_dir: Path,mode: str,display_channel: int,overwrite: bool):
+    """
+    Process one .tiff file for roi, this is a function that will just called repeatedly if user specified dir 
+    """
 
     output_dir.mkdir(parents=True,exist_ok=True)
     stem = tiff_path.stem
