@@ -42,6 +42,10 @@ from matplotlib.widgets import PolygonSelector
 import numpy as np
 import tifffile
 
+import logging, os, sys
+log = logging.getLogger("tissue_roi")
+
+
 
 def load_cyx(path: Path) -> np.ndarray:
     """
@@ -76,8 +80,10 @@ def stretch_to_8bit(plane: np.ndarray,lo_pct: float = 1,hi_pct: float = 99) -> n
 
     plane = plane.astype(np.float32)
     lo, hi = np.percentile(plane,(lo_pct, hi_pct))
+    log.debug("stretch: lo=%.1f hi=%.1f", lo, hi)
 
     if hi <= lo:
+        log.warning("hi <= lo, returning all-black image (plane looks empty/flat)")
         return np.zeros(plane.shape,dtype=np.uint8)
 
     stretched = np.clip((plane - lo) / (hi - lo) * 255,0,255)   # clipp 0,255 2^8 bits 
@@ -203,6 +209,7 @@ def process_one(tiff_path: Path,output_dir: Path,mode: str,display_channel: int,
     output_dir.mkdir(parents=True,exist_ok=True)
     stem = tiff_path.stem
 
+    log.debug("process_one() called")
     mask_path = (output_dir/ f"{stem}_tissue_mask.tif")
     json_path = (output_dir / f"{stem}_tissue_roi.json")
 
@@ -212,6 +219,16 @@ def process_one(tiff_path: Path,output_dir: Path,mode: str,display_channel: int,
         return
 
     stack = load_cyx(tiff_path)
+
+    stack = load_cyx(tiff_path)
+    log.debug("stack shape CYX=%s dtype=%s", stack.shape, stack.dtype)
+    for i, ch in enumerate(stack, start=1):
+        p1, p50, p99 = np.percentile(ch, (1, 50, 99))
+        log.debug("ch%d: min=%s max=%s p1/p50/p99=%.0f/%.0f/%.0f  zero_frac=%.3f",
+                i, ch.min(), ch.max(), p1, p50, p99, (ch == 0).mean())
+        if ch.max() == ch.min():
+            log.warning("ch%d is constant. Possibly empty or corrupt", i)
+
     yx_shape = stack.shape[-2:]
 
     if mode == "full":
@@ -222,6 +239,10 @@ def process_one(tiff_path: Path,output_dir: Path,mode: str,display_channel: int,
     else:
 
         display = make_display(stack,display_channel) # create display for roi selection
+
+        log.debug("display: shape=%s dtype=%s min=%d max=%d mean=%.1f",
+          display.shape, display.dtype, display.min(), display.max(), display.mean())
+
         vertices = select_polygon(display,tiff_path.name) # polygon selection inside image 
 
         if vertices is None:
@@ -258,6 +279,16 @@ def main():
     parser.add_argument("--overwrite",action="store_true") # if there is pre-existing files, do slide139 / slide141 have different naming conventions? might not be used here. 
 
     args = parser.parse_args()
+
+    # in main(), after parse_args():
+    parser.add_argument("--verbose", "-v", action="store_true")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(levelname)s %(message)s")
+
+    log.debug("args=%s", vars(args))
+    log.debug("DISPLAY=%r  backend=%s  python=%s",
+            os.environ.get("DISPLAY"), plt.get_backend(), sys.executable)
 
     files = find_tiffs(args.input)
 
