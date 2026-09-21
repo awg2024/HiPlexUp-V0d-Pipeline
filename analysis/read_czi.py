@@ -54,24 +54,8 @@ CHANNEL_CONFIG = {
     },
 }
 
-# if enable_background flag is activated, collect fluorescence from each channel x,y 
-BACKGROUND_POINTS = {
-    "DAPI": {"x": 8101, "y": 5102}, # TO DO COLLECT X,Y COORDS .
-    "EVX1": {"x": 7964, "y": 4981},
-    "PAX2": {"x": 8180, "y": 5055},
-    "DBX1": {"x": 8022, "y": 5110},
-    "VGAT": {"x": 8138, "y": 4923}}
-
-
 CHANNEL_NAMES = list(CHANNEL_CONFIG.keys())
 FALLBACK_COLOR = (255, 255, 255)    # fallback color if color in metadata 
-
-
-# 0 = exactly one pixel
-# 1 = 3x3 patch around selected point
-# 2 = 5x5 patch around selected point
-BACKGROUND_PATCH_RADIUS = 3
-
 
 def parse_zen_color(hex_str):
     """
@@ -246,29 +230,6 @@ def inspect_and_export(file_path,select_background=False,background_regions=1,ov
     Image.fromarray(composite).save(out_preview)
     print(f"  {out_preview}")
 
-    if select_background:
-
-        print("Measuring channel-specific background fluorescence")
-        background_csv = os.path.join(out_dir,f"{base}_BACKGROUND.csv")
-
-        if (os.path.exists(background_csv) and not overwrite_background):
-            print("Background already measured, skipping.")
-
-        else:
-
-            measurements = measure_background_from_coordinates(stack=stack, background_points=BACKGROUND_POINTS, patch_radius=BACKGROUND_PATCH_RADIUS)
-            save_background_measurements(out_dir=out_dir,base=base,measurements=measurements)
-
-            print("Background measurements from original 16-bit pixels:")
-
-            for row in measurements:
-                print(
-                    f"  {row['channel_name']:<5} "
-                    f"Ch{row['channel_number']}  "
-                    f"XY=({row['x_pixel']}, {row['y_pixel']})"
-                    f"value/mean={row['background_mean']:.2f}")
-
-
 def find_czi_files(folder):
     """Recursively find every .czi file under folder, sorted for consistent order for batch processing. """
     return sorted(glob.glob(os.path.join(folder, "**", "*.czi"), recursive=True))
@@ -313,103 +274,6 @@ def select_background_point(display, title):
     return int(round(x)), int(round(y))
  
  
- def measure_background_from_coordinates(stack, background_points, patch_radius=0):
-    """
-    Measure background fluorescence independently for each biological channel.
-    Each channel has its own Fiji-selected X/Y coordinate hard-coded at the start of the script. 
-    Returns ->> list of dictionaries containing per-channel background measurements.
-    """
-
-    height = stack.shape[1]
-    width = stack.shape[2]
-    results = []
-
-    for channel_name, config in CHANNEL_CONFIG.items():
-        channel_index = config["index"]
-
-        if channel_name not in background_points:
-            raise ValueError(f"No background coordinate provided for {channel_name}")
-
-        x = int(background_points[channel_name]["x"]) # collect x,y coordinates definted by user 
-        y = int(background_points[channel_name]["y"])
-
-        # Make sure coordinate is inside image.
-        if not (0 <= x < width and 0 <= y < height):
-            raise ValueError(
-                f"{channel_name} background point "
-                f"(x={x}, y={y}) is outside image dimensions "
-                f"{width} x {height}")
-        plane = stack[channel_index]
-
-        if patch_radius == 0:
-            values = np.array([plane[y, x]],dtype=np.float64)  # radius point we collect one pixel if set to 0
-
-        else:
-            x0 = max(0, x - patch_radius) # adjust x,y based on patch_radius and collect min max
-            x1 = min(width, x + patch_radius + 1)
-            y0 = max(0, y - patch_radius)
-            y1 = min(height, y + patch_radius + 1)
-            values = plane[y0:y1,x0:x1].astype(np.float64).ravel()
-
-        results.append({ # save all results 
-                "channel_number":config["channel_number"],
-                "channel_name":channel_name,
-                "channel_index":channel_index,
-                "x_pixel":x,
-                "y_pixel":y,
-                "patch_radius":patch_radius,
-                "n_pixels":int(values.size),
-                "background_mean": float(np.mean(values)), 
-                "background_median":float(np.median(values)),
-                "background_std":float(np.std(values)),
-                "background_min":float(np.min(values)),
-                "background_max":float(np.max(values))})
-
-    return results
-
-
-
-def save_background_measurements(out_dir, base, measurements):
-    """
-    Save the Fiji-selected coordinates and corresponding original
-    16-bit fluorescence measurements.
-    """
-
-
-    csv_path = os.path.join(out_dir,f"{base}_BACKGROUND.csv")
-    json_path = os.path.join(out_dir, f"{base}_BACKGROUND.json")
-
-    fieldnames = [
-        "channel_number",
-        "channel_name",
-        "channel_index",
-        "x_pixel",
-        "y_pixel",
-        "patch_radius",
-        "n_pixels",
-        "background_mean",
-        "background_median",
-        "background_std",
-        "background_min",
-        "background_max"]
-
-    with open(csv_path,"w",newline="",) as handle:  # handle csv writing over 
-
-        writer = csv.DictWriter(handle,fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(measurements)
-
-    with open(json_path,"w") as handle:
-
-        json.dump({
-                "source_image":base,
-                "background_points":BACKGROUND_POINTS,
-                "patch_radius":BACKGROUND_PATCH_RADIUS,
-                "measurements": measurements},handle,indent=2)
-
-    print(f"Background CSV:{csv_path}")
-    print(f"Background JSON: {json_path}")
-
 
 # main caller 
 if __name__ == "__main__":
@@ -419,69 +283,45 @@ if __name__ == "__main__":
     # mac os  /Users/angusgray/Desktop/V0d-Histology/HiPlexUp-V0d-Pipeline/raw_czi
     # windows  /home/gray2/Desktop/HiPlexUp/HiPlexUp-V0d-Pipeline/raw_czi
 
-    parser.add_argument("target",nargs="?",default=("/home/gray2/Desktop/HiPlexUp/HiPlexUp-V0d-Pipeline/raw_czi")) # select czi file location 
+    parser.add_argument("target",nargs="?",default=("/Users/angusgray/Desktop/V0d-Histology/HiPlexUp-V0d-Pipeline/raw_czi")) # select czi file location 
     parser.add_argument("--select_background",action="store_true")
     parser.add_argument("--background_regions",type=int,default=1)
     parser.add_argument("--overwrite_background",action="store_true")
-
     args = parser.parse_args()
 
     if os.path.isfile(args.target):
-
         if not args.target.lower().endswith(".czi"):
             raise SystemExit("Input file is not a CZI.")
-
         files = [args.target]
 
     else:
-
         files = find_czi_files(args.target)
 
     if not files:
-
         print(f"No .czi files found under {args.target}")
         sys.exit(0)
 
     print(f"Found {len(files)} CZI file(s)")
     failed = []
-    for i, path in enumerate(
-        files,
-        start=1):
+    for i, path in enumerate(files, start=1):
 
-        print(
-            f"\n{'#' * 60}"
+        print(f"\n{'#' * 60}"
             f"\n[{i}/{len(files)}] "
             f"{path}"
-            f"\n{'#' * 60}"
-        )
+            f"\n{'#' * 60}")
 
         try:
-
-            inspect_and_export(path,
-                select_background=args.select_background,
-                background_regions=args.background_regions,
-                overwrite_background=args.overwrite_background)
+            inspect_and_export(path, select_background=args.select_background, overwrite_background=args.overwrite_background)
 
         except Exception as error:
-
             print(f"ERROR processing {path}: {error}")
             failed.append(path)
 
     print(f"\n{'=' * 60}")
-    print(
-        f"Batch complete: "
-        f"{len(files) - len(failed)}/"
-        f"{len(files)} succeeded"
-    )
-
+    print(f"Batch complete: {len(files) - len(failed)} {len(files)} succeeded")
+    
     if failed:
 
-        print(
-            "Failed files:"
-        )
-
+        print("Failed files:")
         for path in failed:
-
-            print(
-                f"  - {path}"
-            )
+            print(f"  - {path}")
