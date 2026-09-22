@@ -50,4 +50,4 @@ def sanitize_filenames(folder_path, dry_run=True):
 
 if __name__ == "__main__":
     # Test it with a dry run first!
-    sanitize_filenames(target_folder, dry_run=True)
+    sanitize_filenames(target_folder, dry_run=False)

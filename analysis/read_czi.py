@@ -20,11 +20,8 @@ import czifile
 import tifffile
 from PIL import Image
 import glob
-
 import argparse
-import csv
-import json
-import matplotlib.pyplot as plt 
+
 
 CHANNEL_CONFIG = {
     "DAPI": {
@@ -142,7 +139,7 @@ def build_lut(color):
     return lut # changes how the image looks in fiji without changing the source czi 
 
 
-def inspect_and_export(file_path,select_background=False,background_regions=1,overwrite_background=False):
+def inspect_and_export(file_path):
     """
     coordinator function acting as the main processor of czi reading and conversion 
     """
@@ -235,46 +232,6 @@ def find_czi_files(folder):
     return sorted(glob.glob(os.path.join(folder, "**", "*.czi"), recursive=True))
 
 
-def make_background_display(stack):
-    """
-    Helper function to create a display-only 8-bit image for selecting background for the user, we take the max projection so the colours are bright to the user for selecting the background. 
-    """
-    display_channels = []
-    for plane in stack:
-        display_channels.append(stretch_to_8bit(plane))
-    return np.max(np.stack(display_channels,axis=0),axis=0)
-
-
-def select_background_point(display, title):
-    """
-    Interactively click ONE background point.
- 
-    Click once on the image, then close the window (or press any key)
-    to confirm. Closing without clicking cancels.
-    """
- 
-    fig, ax = plt.subplots(figsize=(11, 8))
-    ax.imshow(display, cmap="gray")
-    ax.set_title(
-        f"{title}\n"
-        "Click one point in a representative tissue-background region.\n"
-        "One click only — the window will close automatically."
-    )
-    ax.axis("off")
-    plt.tight_layout()
- 
-    # ginput blocks until n points are clicked or the window is closed
-    pts = plt.ginput(n=1, timeout=0)
-    plt.close(fig)
- 
-    if not pts:
-        return None
- 
-    x, y = pts[0]
-    return int(round(x)), int(round(y))
- 
- 
-
 # main caller 
 if __name__ == "__main__":
 
@@ -284,9 +241,6 @@ if __name__ == "__main__":
     # windows  /home/gray2/Desktop/HiPlexUp/HiPlexUp-V0d-Pipeline/raw_czi
 
     parser.add_argument("target",nargs="?",default=("/Users/angusgray/Desktop/V0d-Histology/HiPlexUp-V0d-Pipeline/raw_czi")) # select czi file location 
-    parser.add_argument("--select_background",action="store_true")
-    parser.add_argument("--background_regions",type=int,default=1)
-    parser.add_argument("--overwrite_background",action="store_true")
     args = parser.parse_args()
 
     if os.path.isfile(args.target):
@@ -311,14 +265,14 @@ if __name__ == "__main__":
             f"\n{'#' * 60}")
 
         try:
-            inspect_and_export(path, select_background=args.select_background, overwrite_background=args.overwrite_background)
+            inspect_and_export(path)
 
         except Exception as error:
             print(f"ERROR processing {path}: {error}")
             failed.append(path)
 
     print(f"\n{'=' * 60}")
-    print(f"Batch complete: {len(files) - len(failed)} {len(files)} succeeded")
+    print(f"Batch complete: {len(files) - len(failed)}/{len(files)} succeeded")
     
     if failed:
 
