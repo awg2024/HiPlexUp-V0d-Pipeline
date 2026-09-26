@@ -18,9 +18,13 @@ cord_median (median of ALL in-cord pixels) is reported alongside for reference, 
 background_std / _min / _max describe only the lower tail (pixels <= the percentile cutoff), so they are truncated and understate true noise.
 
 Examples on how to use the script 
-    python HiPlexUp-V0d-Pipeline/analysis/measure_background.py raw_png
     python HiPlexUp-V0d-Pipeline/analysis/measure_background.py "raw_png/Slide_141/.../..._FIJI.tif"
     python HiPlexUp-V0d-Pipeline/analysis/measure_background.py raw_png --percentile 5 --overwrite 
+
+    TODO!! - ilary mentioned that taking the lowest part of the SD would be the best practice? and take it for each sample as there is inherent variation across sampels ? 
+    i think we should have a csv for each slide with each sample and their corresponding background of eachone. it's the most valid approach i think ah we will need to have 
+    our raw_pngs here? 
+
 """
 
 from __future__ import annotations
