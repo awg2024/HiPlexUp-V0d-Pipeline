@@ -59,6 +59,240 @@ from tqdm import tqdm
 
 from cellpose import models
 
+import csv
+from scipy.ndimage import binary_dilation
+
+
+# Biological channel configuration
+CHANNEL_CONFIG = {
+    "DAPI": {
+        "index": 0,
+        "channel_number": 1,
+        "color": (0, 0, 180),       # dark blue
+    },
+    "EVX1": {
+        "index": 1,
+        "channel_number": 2,
+        "color": (0, 255, 255),     # cyan
+    },
+    "PAX2": {
+        "index": 2,
+        "channel_number": 3,
+        "color": (255, 0, 255),     # magenta
+    },
+    "DBX1": {
+        "index": 3,
+        "channel_number": 4,
+        "color": (255, 255, 0),     # yellow
+    },
+    "VGAT": {
+        "index": 4,
+        "channel_number": 5,
+        "color": (0, 255, 0),       # green
+    },
+}
+
+CELLPOSE_BOUNDARY_COLOR = (255, 255, 255) # white 
+CELLPOSE_ID_COLOR = (255, 255, 255) # white 
+
+#
+# helper functions for all channels overlap with cellpose 
+#
+
+def build_lut(color):
+    """
+    Build a Fiji/ImageJ-compatible lookup table.
+    LUTs only affect how channels are displayed, not underlying pixels. 
+    """
+
+    lut = np.zeros((3, 256), dtype=np.uint8)
+
+    for c in range(3):
+        lut[c] = np.linspace(0,color[c],256,dtype=np.uint8)
+
+    return lut
+
+def make_boundary_channel(mask, thickness=3):
+    """
+    Convert Cellpose boundaries into a 16-bit visualization channel.
+    0 = no boundary
+    65535 = Cellpose boundary
+
+    IMPORTANT:
+    This is visualization only.
+    The actual Cellpose segmentation IDs are not changed.
+    """
+
+    edges = mask_boundaries(mask)
+    if thickness > 1:
+        edges = binary_dilation(edges,iterations=thickness - 1)
+
+    boundary = np.zeros(mask.shape, dtype=np.uint16)
+
+    boundary[edges] = 65535
+
+    return boundary
+
+
+def make_id_channel(mask):
+    """
+    Create a 16-bit channel containing the Cellpose label ID.
+    Example:
+        background -> 0
+        cell_0001  -> pixel value 1
+        cell_0002  -> pixel value 2
+    """
+
+    max_label = int(mask.max())
+
+    if max_label > np.iinfo(np.uint16).max:
+        raise ValueError(f"Cellpose produced {max_label} labels. This exceeds the uint16 limit for the QC TIFF.")
+
+    return mask.astype(np.uint16)
+
+
+def save_cellpose_fiji_tiff(
+    fluorescence_stack,
+    mask,
+    output_path,
+    boundary_thickness=3,
+):
+    """
+    Save one 16-bit Fiji-friendly QC TIFF containing:
+
+        C1 DAPI
+        C2 EVX1
+        C3 PAX2
+        C4 DBX1
+        C5 VGAT
+        C6 CELLPOSE_BOUNDARY
+        C7 CELLPOSE_ID
+
+    The five biological channels are copied directly from the
+    original 16-bit fluorescence TIFF and are not altered.
+    """
+
+    if fluorescence_stack.ndim != 3:
+        raise ValueError(
+            f"Expected fluorescence stack in CYX format, "
+            f"got {fluorescence_stack.shape}")
+
+    if fluorescence_stack.shape[0] != 5:
+        raise ValueError(
+            f"Expected exactly 5 fluorescence channels, "
+            f"found {fluorescence_stack.shape[0]}")
+
+    if mask.shape != fluorescence_stack.shape[-2:]:
+        raise ValueError(
+            f"Mask shape {mask.shape} does not match "
+            f"fluorescence image {fluorescence_stack.shape[-2:]}")
+
+    boundary_channel = make_boundary_channel(mask, thickness=boundary_thickness)
+    id_channel = make_id_channel(mask)
+
+    qc_stack = np.concatenate([
+            fluorescence_stack.astype(np.uint16, copy=False),
+            boundary_channel[np.newaxis, ...],
+            id_channel[np.newaxis, ...]], axis=0)
+
+    colors = [
+        CHANNEL_CONFIG["DAPI"]["color"],
+        CHANNEL_CONFIG["EVX1"]["color"],
+        CHANNEL_CONFIG["PAX2"]["color"],
+        CHANNEL_CONFIG["DBX1"]["color"],
+        CHANNEL_CONFIG["VGAT"]["color"],
+        CELLPOSE_BOUNDARY_COLOR,
+        CELLPOSE_ID_COLOR]
+
+    luts = [build_lut(color) for color in colors]
+
+    tifffile.imwrite(output_path, qc_stack, imagej=True, compression="zlib", compressionargs={"level": 6},
+        metadata={"axes": "CYX", "mode": "composite", "LUTs": luts})
+
+    # Verify that the original biological fluorescence
+    # channels were preserved exactly.
+    check = tifffile.imread(output_path)
+
+    if not np.array_equal(check[:5], fluorescence_stack):
+        raise RuntimeError("QC TIFF verification failed: original fluorescence channels changed.")
+
+
+def build_cell_index(
+    mask,
+    image_id,
+):
+    """
+    Generate one metadata row for every segmented Cellpose object.
+
+    Cell_ID is simply a readable representation of Label_ID:
+
+        label 1   -> cell_0001
+        label 27  -> cell_0027
+        label 635 -> cell_0635
+    """
+
+    rows = []
+    label_ids = np.unique(mask)
+    label_ids = label_ids[label_ids != 0]
+
+    for label_id in label_ids:
+
+        ys, xs = np.where(mask == label_id)
+        if len(xs) == 0:
+            continue
+
+        label_id = int(label_id)
+        cell_id = (f"cell_{label_id:04d}")
+        centroid_x = float(np.mean(xs))
+        centroid_y = float(np.mean(ys))
+
+        rows.append(
+            {
+                "Image_ID": image_id,
+                "Cell_ID": cell_id,
+                "Label_ID": label_id,
+                "X_centroid_px": round(centroid_x, 2),
+                "Y_centroid_px": round(centroid_y, 2),
+                "Area_px": int(len(xs)),
+                "X_min_px": int(xs.min()),
+                "X_max_px": int(xs.max()),
+                "Y_min_px": int(ys.min()),
+                "Y_max_px": int(ys.max()),
+                "Classification": "",})
+
+    return rows
+
+
+def save_cell_index(
+    rows,
+    output_path,
+):
+    """
+    Save basic Cellpose object metadata.
+
+    Classification is intentionally empty at this stage.
+    """
+
+    fieldnames = [
+        "Image_ID",
+        "Cell_ID",
+        "Label_ID",
+        "X_centroid_px",
+        "Y_centroid_px",
+        "Area_px",
+        "X_min_px",
+        "X_max_px",
+        "Y_min_px",
+        "Y_max_px",
+        "Classification"]
+    with open(output_path, "w", newline="") as handle:
+
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+
 # progress helpers
 def fmt_time(seconds: float) -> str:
     seconds = int(round(seconds))
@@ -200,6 +434,57 @@ def prepare_cellpose_input(stack, channels_1based):
     return stack[index], None          # 2D image, no channel axis
 
 
+
+def crop_to_tissue(image, tissue_mask, padding=50):
+    """
+    Crop an image and tissue mask to the smallest rectangular
+    bounding box containing the tissue.
+    """
+
+    if image.shape != tissue_mask.shape:
+        raise ValueError(f"Image shape {image.shape} does not match tissue mask shape {tissue_mask.shape}")
+
+    # Coordinates of all tissue pixels.
+    ys, xs = np.where(tissue_mask)
+
+    if len(xs) == 0 or len(ys) == 0:
+        raise ValueError("Tissue mask contains no positive pixels.")
+
+    height, width = tissue_mask.shape
+
+    # Bounding box around tissue.
+    y0 = max(0, int(ys.min()) - padding)
+    y1 = min(height, int(ys.max()) + 1 + padding)
+
+    x0 = max(0, int(xs.min()) - padding)
+    x1 = min(width, int(xs.max()) + 1 + padding)
+
+    cropped_image = image[y0:y1,x0:x1].copy()
+    cropped_mask = tissue_mask[y0:y1,x0:x1].copy()
+
+    return (cropped_image, cropped_mask, (y0, y1, x0, x1))
+
+
+def restore_full_size_mask(cropped_cellpose_mask, full_shape, bbox):
+    """
+    Insert the cropped Cellpose segmentation back into an
+    empty full-size image. This preserves the original TIFF X/Y coordinate system.
+    """
+
+    y0, y1, x0, x1 = bbox
+    expected_shape = (y1 - y0, x1 - x0,)
+
+    if cropped_cellpose_mask.shape != expected_shape:
+        raise ValueError(f"Cropped Cellpose mask shape {cropped_cellpose_mask.shape} does not match expected crop shape {expected_shape}")
+
+    full_mask = np.zeros(full_shape, dtype=cropped_cellpose_mask.dtype)
+    full_mask[y0:y1, x0:x1] = cropped_cellpose_mask
+
+    return full_mask
+
+
+
+
 def apply_tissue_mask(image, mask):
     """
     Zero everything outside the tissue ROI before segmentation.
@@ -246,18 +531,36 @@ def mask_boundaries(mask):
 
 def save_overlay(display_plane, mask, output_path):
     """
-    Save a QC image showing the Cellpose boundaries (yellow) over the fluorescence image.
-    QC only: no measurements should be taken from this image.
+    Save a QC image showing Cellpose boundaries over the
+    fluorescence image.
+
+    IMPORTANT:
+    Boundary thickening is for visualisation ONLY.
+    The underlying Cellpose mask is not changed.
     """
 
     gray = stretch_to_8bit(display_plane)
+
     rgb = np.repeat(gray[..., None], 3, axis=-1)
 
-    edges = mask_boundaries(mask)
-    rgb[edges] = np.array([255, 255, 0], dtype=np.uint8)   # yellow boundaries
+    edges = mask_boundaries(
+mask
+    )
 
-    plt.imsave(output_path, rgb)
+    thick_edges = binary_dilation(
+        edges,
+        iterations=4
+    )
 
+    rgb[thick_edges] = np.array(
+        [255, 255, 0],
+        dtype=np.uint8
+    )
+
+    plt.imsave(
+        output_path,
+        rgb
+    )
 
 # --------------------------------------------------------------------------
 # file handling
@@ -295,12 +598,15 @@ def process_one(tiff_path, model, output_dir, channels, tissue_mask_dir, diamete
     """
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    mask_path = output_dir / f"{tiff_path.stem}_cellpose_mask.tif"
-    overlay_path = output_dir / f"{tiff_path.stem}_cellpose_overlay.png"
-    run_path = output_dir / f"{tiff_path.stem}_cellpose_run.json"
-
-    if mask_path.exists() and not overwrite:
-        print(f"[SKIP] {mask_path} since it already exists")
+    qc_tiff_path = (output_dir / f"{tiff_path.stem}_cellpose_QC_16bit_FIJI.tif")
+    cell_csv_path = (output_dir / f"{tiff_path.stem}_cellpose_cells.csv")
+    overlay_path = (output_dir / f"{tiff_path.stem}_cellpose_overlay.png")
+    run_path = (output_dir / f"{tiff_path.stem}_cellpose_run.json")
+    
+   
+    if (qc_tiff_path.exists() and cell_csv_path.exists() and not overwrite):
+        
+        print(f"[SKIP] Outputs already exist for {tiff_path.name}")
         return False
 
     # The tissue ROI is required in this workflow: skip instead of segmenting empty slide.
@@ -310,16 +616,43 @@ def process_one(tiff_path, model, output_dir, channels, tissue_mask_dir, diamete
         return False
 
     t_slide = time.perf_counter()
-    n_steps = 6
+    n_steps = 7
 
     with stage(1, n_steps, "Loading TIFF and tissue mask"):
-        stack = load_cyx(tiff_path)
-        cp_image, channel_axis = prepare_cellpose_input(stack, channels)
-        tissue_mask = tifffile.imread(tissue_mask_path).astype(bool)
-        cp_image = apply_tissue_mask(cp_image, tissue_mask)
-        print(f"      tissue mask: {tissue_mask_path.name}  image: {cp_image.shape[1]} x {cp_image.shape[0]} px")
 
-    with stage(2, n_steps, "Cellpose segmentation (the slow step)"):
+        stack = load_cyx(tiff_path)
+
+        cp_image, channel_axis = (prepare_cellpose_input(stack,channels))
+        tissue_mask = tifffile.imread(tissue_mask_path).astype(bool)
+
+        if tissue_mask.shape != cp_image.shape:
+            raise ValueError(f"Tissue mask shape {tissue_mask.shape} does not match Cellpose image shape {cp_image.shape}")
+
+        # Keep original dimensions because the final segmentation will be restored to this coordinate system.
+        full_shape = cp_image.shape
+
+        original_pixels = (cp_image.shape[0] * cp_image.shape[1]) #  store the original pixel shape 
+
+        # Crop BOTH the Cellpose input and the tissue mask.
+        (cp_image, cropped_tissue_mask, crop_bbox,) = crop_to_tissue(cp_image, tissue_mask, padding=50)
+
+        # Zero non-tissue pixels INSIDE the cropped rectangle, cellpose only sees spinal cord no surroudning background of 0s 
+        cp_image = apply_tissue_mask(cp_image, cropped_tissue_mask)
+
+        cropped_pixels = (cp_image.shape[0] * cp_image.shape[1]) #  store cropped shape 
+
+        reduction = (original_pixels / cropped_pixels) # reduction of pixels 
+
+        y0, y1, x0, x1 = crop_bbox
+
+        print(f"tissue mask: {tissue_mask_path.name}")
+        print(f" original image: {full_shape[1]} x {full_shape[0]} px")
+        print(f" crop bounds: X={x0}:{x1}, Y={y0}:{y1}")
+        print(f" Cellpose image: {cp_image.shape[1]} x {cp_image.shape[0]} px")
+        print(f" pixel reduction: {reduction:.2f}x")
+            
+
+    with stage(2, n_steps, "Cellpose segmentation"):
         # normalize=True rescales the image by its own intensity percentiles (see model.eval docs).
         masks = run_cellpose_eval(model, cp_image, channel_axis, diameter,
                                   flow_threshold=flow_threshold,
@@ -327,20 +660,48 @@ def process_one(tiff_path, model, output_dir, channels, tissue_mask_dir, diamete
                                   min_size=min_size,
                                   normalize=True)
 
-    with stage(3, n_steps, "Enforcing tissue ROI and relabelling"):
+   
+    with stage(3,n_steps,"Enforcing tissue ROI, restoring full coordinates, and relabelling"):
+
+        # Cellpose result currently corresponds only
+        # to the cropped spinal cord region.
         masks = masks.copy()
-        masks[~tissue_mask] = 0            # cells outside the ROI are removed after segmentation
+
+        # Remove anything Cellpose found outside the
+        # manually selected spinal-cord tissue.
+        masks[~cropped_tissue_mask] = 0
+
+        # Clean labels while image is still small.
         masks = relabel_sequential(masks)
 
-    with stage(4, n_steps, "Writing mask TIFF"):
-        tifffile.imwrite(mask_path, masks.astype(np.uint32), compression="zlib")
+        # Restore segmentation into original full-size image coordinate system 
+        masks = restore_full_size_mask(cropped_cellpose_mask=masks, full_shape=full_shape, bbox=crop_bbox)
+    
+    with stage(4, n_steps, "Writing 7-channel Fiji QC TIFF"):
 
-    with stage(5, n_steps, "Writing QC overlay"):
+        save_cellpose_fiji_tiff(fluorescence_stack=stack, mask=masks, output_path=qc_tiff_path, boundary_thickness=3)
+
+
+    with stage(5, n_steps, "Writing cell index CSV"):
+
+        cell_rows = build_cell_index(mask=masks, image_id=tiff_path.stem,)
+        save_cell_index(rows=cell_rows, output_path=cell_csv_path)
+
+    with stage(6, n_steps, "Writing QC overlay"):
         display_plane = stack[channels[0] - 1]     # first selected channel is the QC background
         save_overlay(display_plane, masks, overlay_path)
 
-    with stage(6, n_steps, "Writing run info"):
+    with stage(7, n_steps, "Writing run info"):
         run_info = {
+            "original_shape_yx": [int(full_shape[0]), int(full_shape[1])],
+            "cellpose_crop_shape_yx": [int(y1 - y0), int(x1 - x0)],
+            "crop_bbox": {
+                "x_min": int(x0),
+                "x_max_exclusive": int(x1),
+                "y_min": int(y0),
+                "y_max_exclusive": int(y1)},
+            "crop_padding_pixels": 50,
+            "pixel_reduction_factor": round(original_pixels / cropped_pixels, 3),
             "source_tiff": str(tiff_path),
             "channels_1_based": channels,
             "n_cells": int(masks.max()),
@@ -349,17 +710,28 @@ def process_one(tiff_path, model, output_dir, channels, tissue_mask_dir, diamete
             "cellprob_threshold": cellprob_threshold,
             "min_size_pixels": min_size,
             "tissue_mask": str(tissue_mask_path),
-            "mask_path": str(mask_path),
+            "qc_tiff_path":str(qc_tiff_path),
+            "cell_csv_path":str(cell_csv_path),
+            "channel_layout": {
+                "1": "DAPI",
+                "2": "EVX1",
+                "3": "PAX2",
+                "4": "DBX1",
+                "5": "VGAT",
+                "6": "CELLPOSE_BOUNDARY",
+                "7": "CELLPOSE_ID"},
             "overlay_path": str(overlay_path),
             "device": str(getattr(model, "device", "unknown")),
             "seconds": round(time.perf_counter() - t_slide, 1)}
         run_path.write_text(json.dumps(run_info, indent=2))
 
     print(f"[OK] {tiff_path.name}: {int(masks.max())} detected cell masks")
-    print(f"     mask: {mask_path}")
+    print(f"[OK] {tiff_path.name}: {int(masks.max())} detected cell masks")
+    print(f"     Fiji QC TIFF: {qc_tiff_path}")
+    print(f"     Cell CSV:     {cell_csv_path}")
+    print(f"     Overlay:      {overlay_path}")
     print(f"     overlay: {overlay_path}")
     return True
-
 
 def main():
 
