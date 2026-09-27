@@ -1,3 +1,6 @@
+#
+# for amending the .csv cellpose with the new areas 
+#
 from pathlib import Path
 import pandas as pd
 
