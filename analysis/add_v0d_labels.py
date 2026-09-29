@@ -1,15 +1,17 @@
 from pathlib import Path
 import pandas as pd
 
-csv_path = Path(
+csv_path = Path(""
     "./cellpose_masks/Slide_139/area_filtered/"
     "139-129-122-134-30JUL26-RESCAN-Split_Scenes_(Write_files)-"
-    "01-Scene-10-ScanRegion9_ALLCHANNELS_16bit_FIJI_cellpose_cells.csv"
+    "01-Scene-09-ScanRegion8_ALLCHANNELS_16bit_FIJI_cellpose_cells.csv"
 )
 
-V0D_IDS = {
-    222, 285, 249, 254, 238, 249, 245, 231, 258, 262, 210, 128, 92, 118, 314, 301, 204, 
-    224, 186, 264, 113, 472, 468, 466, 371, 376, 362, 430, 336
+V0D_IDS = {442, 502, 536, 550, 499, 523, 618, 634, 691, 710, 
+           719, 659, 669, 744, 751, 767, 669, 646, 556, 539, 
+           441, 403, 366, 441, 383, 687, 694, 338, 331, 289, 
+           296, 242, 237, 253, 280, 230, 231, 168, 81, 127, 
+           280, 155, 104, 76, 99, 41, 86, 110, 168
 }
 
 df = pd.read_csv(csv_path)
