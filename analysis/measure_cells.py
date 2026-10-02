@@ -14,6 +14,12 @@ For each segmented cell:
 
 Output:
     one combined CSV with one row per cell
+
+
+Example run;
+
+python HiPlexUp-V0d-Pipeline/analysis/measure_cells.py --cells-dir cellpose_counts_141/area_filtered_141/ --tiff-dir cellpose_masks/Slide_141/ --background-csv 141_bg_fluorescence/Slide_141_background.csv --output row-wise-141/Slide_141_measure_cells.csv
+
 """
 
 from pathlib import Path
@@ -89,6 +95,11 @@ def measure_sample(cells_csv, qc_tiff, background_df):
     """
 
     cells = pd.read_csv(cells_csv)
+
+    cells["Classification"] = (cells["Classification"].fillna("").astype(str).str.strip())
+
+    cells = cells[cells["Classification"] != "non-V0d-area-low"].copy()
+
     stack = tifffile.imread( qc_tiff)
 
     if stack.ndim != 3 or stack.shape[0] < 7:
